@@ -90,11 +90,14 @@ void setup_udp_socket(SOCKET *sock) {
     printf("UDP socket bound to port %d.\n", PORT);
 }
 
-char *generate_token(const char *user_id) {
+long get_unix_timestamp() {
+    return time(NULL);
+}
+
+char *generate_token(const char *user_id, const char *scope, int ttl) {
     static char token[256];
-    time_t now = time(NULL);
-    int ttl = 3600; // 1 hour TTL
-    snprintf(token, sizeof(token), "%s|%ld|chat", user_id, now + ttl);
+    long now = get_unix_timestamp();
+    snprintf(token, sizeof(token), "%s|%ld|%s", user_id, now + ttl, scope);
     return token;
 }
 
@@ -103,10 +106,6 @@ char *generate_message_id() {
     for (int i = 0; i < 8; ++i)
         sprintf(&id[i * 2], "%02x", rand() % 256);
     return id;
-}
-
-long get_unix_timestamp() {
-    return time(NULL);
 }
 
 void update_peer(const char *uid, const char *name, const char *st, struct sockaddr_in *addr) {
@@ -207,7 +206,7 @@ void send_follow_packet(SOCKET sock, const char *target_user_id, int follow) {
 
     char msg[512];
     char *msg_id = generate_message_id();
-    char *token = generate_token(user_id); // user_id|+TTL|follow
+    char *token = generate_token(user_id, "follow", 3600); // user_id|+TTL|follow
     long ts = get_unix_timestamp();
 
     snprintf(msg, sizeof(msg),
@@ -304,7 +303,7 @@ void send_like_packet(SOCKET sock, Post *post, int like) {
     }
 
     char msg[512];
-    char *token = generate_token(user_id);
+    char *token = generate_token(user_id, "broadcast", 3600);
     long ts_now = get_unix_timestamp();
 
     snprintf(msg, sizeof(msg),
@@ -318,7 +317,7 @@ void send_like_packet(SOCKET sock, Post *post, int like) {
 void send_group_create(SOCKET sock, const char *group_id, const char *group_name, const char *members) {
     char msg[1024];
     long ts = get_unix_timestamp();
-    char *token = generate_token(user_id);
+    char *token = generate_token(user_id, "group", 3600);
 
     snprintf(msg, sizeof(msg),
         "TYPE: GROUP_CREATE\nFROM: %s\nGROUP_ID: %s\nGROUP_NAME: %s\nMEMBERS: %s\nTIMESTAMP: %ld\nTOKEN: %s\n\n",
@@ -355,7 +354,7 @@ void send_group_create(SOCKET sock, const char *group_id, const char *group_name
 void send_group_update(SOCKET sock, const char *group_id, const char *add_list, const char *remove_list) {
     char msg[1024];
     long ts = get_unix_timestamp();
-    char *token = generate_token(user_id);
+    char *token = generate_token(user_id, "group", 3600);
 
     snprintf(msg, sizeof(msg),
         "TYPE: GROUP_UPDATE\nFROM: %s\nGROUP_ID: %s\nADD: %s\nREMOVE: %s\nTIMESTAMP: %ld\nTOKEN: %s\n\n",
@@ -394,7 +393,7 @@ void send_group_update(SOCKET sock, const char *group_id, const char *add_list, 
 void send_group_message(SOCKET sock, const char *group_id, const char *content) {
     char msg[1024];
     long ts = get_unix_timestamp();
-    char *token = generate_token(user_id);
+    char *token = generate_token(user_id, "group_message", 3600);
 
     snprintf(msg, sizeof(msg),
         "TYPE: GROUP_MESSAGE\nFROM: %s\nGROUP_ID: %s\nCONTENT: %s\nTIMESTAMP: %ld\nTOKEN: %s\n\n",
@@ -825,7 +824,7 @@ void send_dm(SOCKET sock, Peer *peer, const char *text) {
     }
 
     long timestamp = get_unix_timestamp();
-    char *token = generate_token(user_id);
+    char *token = generate_token(user_id, "chat", 3600);
     char *msg_id = generate_message_id();
 
     char msg[1024];
