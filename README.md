@@ -5,23 +5,23 @@ Wesley Brian Sy -      Network Communications - UDP Socket Setup, mDNS Discovery
 
 
 
-AI Usage Discalimer:
-We used ChatGPT to assist with some of codes and understanding protocols. However, these codes were reviewed, tested, verified first by us.
+#AI Usage Discalimer:
+We used ChatGPT to assist with some portions of the codes and understanding protocol specifications. However, these codes were reviewed, tested, verified first by us.
 
 
-Project Structure:
-
-
-
-Features Implemented:
+#Project Structure:
 
 
 
-Testing Instructions:
+#Features Implemented:
 
 
 
-Demo Video:
+#Testing Instructions:
+
+
+
+#Demo Video:
 
 
 
