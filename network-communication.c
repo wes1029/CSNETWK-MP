@@ -101,6 +101,8 @@ CRITICAL_SECTION status_lock;
 CRITICAL_SECTION peer_lock;
 CRITICAL_SECTION notif_lock;
 
+//prototype for Tic Tac Toe message handler
+void handle_tictactoe_move_message(const char *gameid, int position, char symbol);
 
 void setup_udp_socket(SOCKET *sock) {
     *sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -1391,8 +1393,9 @@ void send_tictactoe(SOCKET sock, const char *from_uid, const char *to_uid, const
         from_uid, to_uid, gameid, msg_id, symbol, ts, token);
     sendto(sock, msg, strlen(msg), 0, (struct sockaddr *)&target_addr, sizeof(target_addr));
     printf("TicTacToe invite sent to %s for game %s.\n", to_uid, gameid);
+}
 
-    void handle_tictactoe_move_message(const char *gameid, int position, char symbol) {
+void handle_tictactoe_move_message(const char *gameid, int position, char symbol) {
     if (ttt_msg_count < MAX_TTT_MSGS) {
         strcpy(ttt_msg_queue[ttt_msg_count].gameid, gameid);
         ttt_msg_queue[ttt_msg_count].position = position;
@@ -1550,9 +1553,6 @@ void start_tictactoe_game() {
     int my_turn_first = 1; // 1 if you go first, 0 if opponent goes first
     printf("\nStarting TicTacToe game with GameID: %s\n", gameid);
     tictactoe_gameplay_loop(gameid, my_symbol, opp_symbol, my_turn_first);
-}
-
-    
 }
 
 
