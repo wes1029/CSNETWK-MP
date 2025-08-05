@@ -20,6 +20,8 @@
 #define MAX_NOTIFICATIONS 100
 #define TTL_DEFAULT 3600
 #define VERBOSE(...) do { if (verbose_mode) printf(__VA_ARGS__); } while (0)
+#define TICTACTOE_BOARD_SIZE 9
+#define MAX_TTT_MSGS 10
 
 char username[50];
 char user_id[128];
@@ -70,12 +72,35 @@ typedef struct {
     int active;
 } Notification;
 
+struct TTTMoveMsg {
+    char gameid[32];
+    int position;
+    char symbol;
+};
+
+typedef struct {
+    char fileid[64];
+    char filename[256];
+    long filesize;
+    char filetype[64];
+    char description[256];
+    int accepted;
+    int total_chunks;
+    int received_chunks;
+    char **chunks; // Array of base64 strings
+} FileTransferContext;
+FileTransferContext file_ctx;
+
+struct TTTMoveMsg ttt_msg_queue[MAX_TTT_MSGS];
+int ttt_msg_count = 0;
+
 Notification notifications[MAX_NOTIFICATIONS];
 int notification_count = 0;
 
 CRITICAL_SECTION status_lock;
 CRITICAL_SECTION peer_lock;
 CRITICAL_SECTION notif_lock;
+
 
 void setup_udp_socket(SOCKET *sock) {
     *sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -878,7 +903,21 @@ void receive_messages(SOCKET sock) {
                 }
 
                 if (from && gid && gname && members && ts) add_group(from, gid, gname, members, atol(ts));
-
+          
+            //TIC TAC TOE
+            } else if (strstr(type_line, "TYPE: TICTACTOE_MOVE")) {
+                char *gameid = NULL, *position_str = NULL, *symbol_str = NULL, *line;
+                while ((line = strtok(NULL, "\n")) != NULL) {
+                    if (strncmp(line, "GAMEID: ", 8) == 0) gameid = line + 8;
+                    else if (strncmp(line, "POSITION: ", 10) == 0) position_str = line + 10;
+                    else if (strncmp(line, "SYMBOL: ", 8) == 0) symbol_str = line + 8;
+                }
+                if (gameid && position_str && symbol_str) {
+                    int pos = atoi(position_str);
+                    char symbol = symbol_str[0];
+                    handle_tictactoe_move_message(gameid, pos, symbol);
+                }
+                
             } else if (strstr(type_line, "TYPE: GROUP_UPDATE")) {
                 char *from = NULL, *gid = NULL, *add = NULL, *remove = NULL, *timestamp = NULL, *token = NULL, *line;
 
@@ -1186,6 +1225,336 @@ void input_loop(void *arg) {
         }
     }
 }
+/* FUNCTIONS FOR FILE TRANSFER */
+// Sends a FILE_OFFER message to a peer
+void send_file_offer(SOCKET sock, const char *from_uid, const char *to_uid, const char *filename, long filesize, const char *filetype, const char *fileid, const char *description) {
+    struct sockaddr_in target_addr = {0}; 
+    int found = 0;
+    // Find the target user's address
+    EnterCriticalSection(&peer_lock);
+    for (int i = 0; i < peer_count; ++i) {
+        if (strcmp(peer_list[i].user_id, to_uid) == 0) {
+            target_addr = peer_list[i].address;
+            found = peer_list[i].has_address;
+            break;
+        }
+    }
+    LeaveCriticalSection(&peer_lock);
+    if (!found) {
+        printf("Cannot send FILE_OFFER: unknown or offline peer.\n");
+        return;
+    }
+    // Prepare the message
+    long ts = get_unix_timestamp();
+    char *token = generate_token(from_uid, "file", 3600);
+    char msg[1024];
+    snprintf(msg, sizeof(msg),
+        "TYPE: FILE_OFFER\nFROM: %s\nTO: %s\nFILENAME: %s\nFILESIZE: %ld\nFILETYPE: %s\nFILEID: %s\nDESCRIPTION: %s\nTIMESTAMP: %ld\nTOKEN: %s\n\n",
+        from_uid, to_uid, filename, filesize, filetype, fileid, description ? description : "", ts, token);
+    sendto(sock, msg, strlen(msg), 0, (struct sockaddr *)&target_addr, sizeof(target_addr));
+    printf("File offer sent to %s for file '%s'.\n", to_uid, filename);
+}
+void reset_file_ctx() {
+    memset(&file_ctx, 0, sizeof(file_ctx)); // Reset all fields
+    if (file_ctx.chunks) {
+        for (int i = 0; i < file_ctx.total_chunks; ++i) {
+            if (file_ctx.chunks[i]) free(file_ctx.chunks[i]);  // Free each chunk
+        }
+        free(file_ctx.chunks);
+        file_ctx.chunks = NULL; // Reset pointer
+    }
+}
+
+// Handles incoming FILE_OFFER messages
+void handle_file_offer(const char *from, const char *filename, long filesize, const char *filetype, const char *fileid, const char *description) {
+    reset_file_ctx(); // Reset the context for a new file transfer
+    strncpy(file_ctx.fileid, fileid, sizeof(file_ctx.fileid)); // Store file ID
+    strncpy(file_ctx.filename, filename, sizeof(file_ctx.filename)); // Store filename
+    file_ctx.filesize = filesize; // Store file size
+    strncpy(file_ctx.filetype, filetype, sizeof(file_ctx.filetype));
+    strncpy(file_ctx.description, description ? description : "", sizeof(file_ctx.description));
+    file_ctx.accepted = 0;
+    printf("User %s is sending you a file '%s' (%s, %ld bytes). Do you accept? (y/n): ", from, filename, filetype, filesize);
+    char input[8];
+    fgets(input, sizeof(input), stdin);
+    if (input[0] == 'y' || input[0] == 'Y') { // Accept the file offer
+        file_ctx.accepted = 1;
+        printf("Accepted file offer. Waiting for file chunks...\n");
+    } else {
+        file_ctx.accepted = 0;
+        printf("Ignored file offer.\n");
+    }
+}
+
+// Sends a FILE_CHUNK message to a peer
+void send_file_chunk(SOCKET sock, const char *from_uid, const char *to_uid, const char *fileid, int chunk_index, int total_chunks, int chunk_size, const char *base64_data) {
+    struct sockaddr_in target_addr = {0};
+    int found = 0;
+
+    // Find the target user's address
+    EnterCriticalSection(&peer_lock);
+    for (int i = 0; i < peer_count; ++i) {
+        if (strcmp(peer_list[i].user_id, to_uid) == 0) {
+            target_addr = peer_list[i].address;
+            found = peer_list[i].has_address;
+            break;
+        }
+    }
+    LeaveCriticalSection(&peer_lock);
+    if (!found) {
+        printf("Cannot send FILE_CHUNK: unknown or offline peer.\n");
+        return;
+    }
+    char *token = generate_token(from_uid, "file", 3600);
+    char msg[2048];
+    snprintf(msg, sizeof(msg),
+        "TYPE: FILE_CHUNK\nFROM: %s\nTO: %s\nFILEID: %s\nCHUNK_INDEX: %d\nTOTAL_CHUNKS: %d\nCHUNK_SIZE: %d\nTOKEN: %s\nDATA: %s\n\n",
+        from_uid, to_uid, fileid, chunk_index, total_chunks, chunk_size, token, base64_data);
+    sendto(sock, msg, strlen(msg), 0, (struct sockaddr *)&target_addr, sizeof(target_addr));
+    // No print until all chunks are received
+}
+
+// Handles incoming FILE_CHUNK message 
+void handle_file_chunk(const char *fileid, int chunk_index, int total_chunks, int chunk_size, const char *base64_data, const char *filename) {
+    if (!file_ctx.accepted || strcmp(file_ctx.fileid, fileid) != 0) // Check if this chunk belongs to the current file transfer
+      return; 
+    if (!file_ctx.chunks) { // Initialize the chunks array if not already done
+        file_ctx.total_chunks = total_chunks;
+        file_ctx.chunks = (char **)calloc(total_chunks, sizeof(char *));
+        file_ctx.received_chunks = 0;
+    } 
+    if (chunk_index < 0 || chunk_index >= total_chunks)  // Invalid chunk index
+      return;
+    return;
+    if (!file_ctx.chunks[chunk_index]) { // Only store if not already received
+        file_ctx.chunks[chunk_index] = strdup(base64_data);
+        file_ctx.received_chunks++;
+    }
+    if (file_ctx.received_chunks == total_chunks) { // All chunks received
+        printf("File transfer of %s is complete\n", filename);
+        //Can potentially add code here to decode if needed - Johann
+        reset_file_ctx(); // Reset context for next transfer
+    }
+}
+
+// Sends a FILE_RECEIVED message to a peer
+void send_file_received(SOCKET sock, const char *from_uid, const char *to_uid, const char *fileid, const char *status) {
+    struct sockaddr_in target_addr = {0};
+    int found = 0;
+
+    // Find the target user's address
+    EnterCriticalSection(&peer_lock);
+    for (int i = 0; i < peer_count; ++i) {
+        if (strcmp(peer_list[i].user_id, to_uid) == 0) {
+            target_addr = peer_list[i].address;
+            found = peer_list[i].has_address;
+            break;
+        }
+    }
+    LeaveCriticalSection(&peer_lock);
+    if (!found) return;
+    long ts = get_unix_timestamp();
+    char msg[512];
+    snprintf(msg, sizeof(msg), // Prepare the message
+        "TYPE: FILE_RECEIVED\nFROM: %s\nTO: %s\nFILEID: %s\nSTATUS: %s\nTIMESTAMP: %ld\n\n",
+        from_uid, to_uid, fileid, status, ts);
+    sendto(sock, msg, strlen(msg), 0, (struct sockaddr *)&target_addr, sizeof(target_addr));
+   
+}
+
+
+/* FUNCTIONS FOR TIC TAC TOE */ 
+
+// This function sends a TicTacToe invite to a user
+void send_tictactoe(SOCKET sock, const char *from_uid, const char *to_uid, const char *gameid, const char *symbol) {
+    struct sockaddr_in target_addr = {0};
+    int found = 0;
+    EnterCriticalSection(&peer_lock);
+    for (int i = 0; i < peer_count; ++i) {
+        if (strcmp(peer_list[i].user_id, to_uid) == 0) {
+            target_addr = peer_list[i].address;
+            found = peer_list[i].has_address;
+            break;
+        }
+    }
+    LeaveCriticalSection(&peer_lock);
+    if (!found) {
+        printf("Cannot send TicTacToe invite: unknown or offline peer.\n");
+        return;
+    }
+    char msg[512];
+    char *msg_id = generate_message_id();
+    long ts = get_unix_timestamp();
+    char *token = generate_token(from_uid, "tictactoe", 3600);
+    snprintf(msg, sizeof(msg),
+        "TYPE: TicTacToe_invite\nFROM: %s\nTO: %s\nGAMEID: %s\nMESSAGE_ID: %s\nSYMBOL: %s\nTIMESTAMP: %ld\nTOKEN: %s\n\n",
+        from_uid, to_uid, gameid, msg_id, symbol, ts, token);
+    sendto(sock, msg, strlen(msg), 0, (struct sockaddr *)&target_addr, sizeof(target_addr));
+    printf("TicTacToe invite sent to %s for game %s.\n", to_uid, gameid);
+
+    void handle_tictactoe_move_message(const char *gameid, int position, char symbol) {
+    if (ttt_msg_count < MAX_TTT_MSGS) {
+        strcpy(ttt_msg_queue[ttt_msg_count].gameid, gameid);
+        ttt_msg_queue[ttt_msg_count].position = position;
+        ttt_msg_queue[ttt_msg_count].symbol = symbol;
+        ttt_msg_count++;
+    }
+}
+
+// Simulate receiving a TicTacToe move from the network
+int receive_tictactoe_move(const char *expected_gameid, char *symbol_out) {
+    while (1) {
+        for (int i = 0; i < ttt_msg_count; ++i) {
+            if (strcmp(ttt_msg_queue[i].gameid, expected_gameid) == 0) {
+                int pos = ttt_msg_queue[i].position;
+                *symbol_out = ttt_msg_queue[i].symbol;
+                for (int j = i; j < ttt_msg_count - 1; ++j) {
+                    ttt_msg_queue[j] = ttt_msg_queue[j+1];
+                }
+                ttt_msg_count--;
+                printf("[Network] Received opponent move: position %d, symbol %c\n", pos, *symbol_out);
+                return pos;
+            }
+        }
+        Sleep(100); // Simulate waiting for a message
+    }
+}
+char detect_tictactoe_result(const char board[TICTACTOE_BOARD_SIZE], char *winning_line) {
+    int win_patterns[8][3] = {
+        {0,1,2}, {3,4,5}, {6,7,8},
+        {0,3,6}, {1,4,7}, {2,5,8},
+        {0,4,8}, {2,4,6}
+    };
+    for (int i = 0; i < 8; ++i) {
+        int a = win_patterns[i][0], b = win_patterns[i][1], c = win_patterns[i][2];
+        if (board[a] && board[a] == board[b] && board[a] == board[c]) {
+            sprintf(winning_line, "%d,%d,%d", a, b, c);
+            return board[a];
+        }
+    }
+    winning_line[0] = '\0';
+    return '\0';
+}
+
+void print_tictactoe_result(const char *gameid, const char *result, const char *winning_line) {
+    printf("\n--- TicTacToe Game Result ---\n");
+    printf("GameID: %s\n", gameid);
+    if (result && result[0]) {
+        printf("Result: %s\n", result);
+    } else {
+        printf("Result: Draw or ongoing\n");
+    }
+    if (winning_line && winning_line[0]) {
+        printf("Winning Line: %s\n", winning_line);
+    }
+    printf("---------------------------\n");
+}
+
+void tictactoe_gameplay_loop(const char *gameid, char my_symbol, char opp_symbol, int my_turn_first) {
+    char board[TICTACTOE_BOARD_SIZE] = {0};
+    int turn = 0;
+    char result[32] = "";
+    char winning_line[16] = "";
+    int finished = 0;
+
+    // Ask for opponent info
+    int opp_idx = -1;
+    printf("\nSelect opponent by peer number:\n");
+    EnterCriticalSection(&peer_lock);
+    for (int i = 0; i < peer_count; ++i) {
+        printf("[%d] %s (%s)\n", i, peer_list[i].display_name, peer_list[i].user_id);
+    }
+    LeaveCriticalSection(&peer_lock);
+    printf("Enter peer number: ");
+    scanf("%d", &opp_idx); getchar();
+    if (opp_idx < 0 || opp_idx >= peer_count || !peer_list[opp_idx].has_address) {
+        printf("Invalid opponent selection.\n");
+        return;
+    }
+    Peer *opponent = &peer_list[opp_idx];
+
+    SOCKET sock;
+    setup_udp_socket(&sock);
+
+    // Send TicTacToe invite before starting the game
+    send_tictactoe(sock, user_id, opponent->user_id, gameid, (my_turn_first ? "X" : "O"));
+
+    printf("Waiting for opponent to accept TicTacToe invite...\n");
+    // Wait for opponent to respond with a move (first move or any response)
+    int accepted = 0;
+    while (!accepted) {
+        char net_symbol = opp_symbol;
+        int pos = receive_tictactoe_move(gameid, &net_symbol);
+        if (pos >= 0 && pos < TICTACTOE_BOARD_SIZE) {
+            // Opponent responded, start game
+            board[pos] = net_symbol;
+            printf("Opponent accepted and moved at position %d\n", pos);
+            turn = 1; // Opponent made first move
+            accepted = 1;
+        }
+    }
+
+    while (!finished && turn < TICTACTOE_BOARD_SIZE) {
+        printf("\nCurrent board:\n");
+        for (int i = 0; i < TICTACTOE_BOARD_SIZE; ++i) {
+            printf("%c ", board[i] ? board[i] : (i + '0'));
+            if ((i+1)%3==0) printf("\n");
+        }
+        int pos = -1;
+        if ((turn % 2 == 0) == my_turn_first) {
+            // My move
+            printf("Your move (%c). Enter position (0-8): ", my_symbol);
+            scanf("%d", &pos); getchar();
+            if (pos < 0 || pos >= TICTACTOE_BOARD_SIZE || board[pos]) {
+                printf("Invalid move. Try again.\n");
+                continue;
+            }
+            board[pos] = my_symbol;
+            // Send move to opponent
+            char msg[256];
+            snprintf(msg, sizeof(msg),
+                "TYPE: TICTACTOE_MOVE\nGAMEID: %s\nPOSITION: %d\nSYMBOL: %c\n\n",
+                gameid, pos, my_symbol);
+            sendto(sock, msg, strlen(msg), 0, (struct sockaddr *)&opponent->address, sizeof(opponent->address));
+        } else {
+            // Opponent move (networked)
+            printf("Waiting for opponent move (%c)...\n", opp_symbol);
+            char net_symbol = opp_symbol;
+            pos = receive_tictactoe_move(gameid, &net_symbol);
+            if (pos < 0 || pos >= TICTACTOE_BOARD_SIZE || board[pos]) {
+                printf("Received invalid move from network.\n");
+                continue;
+            }
+            board[pos] = net_symbol;
+            printf("Opponent moved at position %d\n", pos);
+        }
+        turn++;
+        char winner = detect_tictactoe_result(board, winning_line);
+        if (winner) {
+            snprintf(result, sizeof(result), "%c wins", winner);
+            finished = 1;
+        } else if (turn == TICTACTOE_BOARD_SIZE) {
+            strcpy(result, "Draw");
+            finished = 1;
+        }
+    }
+    print_tictactoe_result(gameid, result, winning_line);
+    closesocket(sock);
+}
+
+// CALL THIS TO START A TIC TAC TOE GAME !!!!
+void start_tictactoe_game() {
+    char gameid[32] = "game123";
+    char my_symbol = 'X';
+    char opp_symbol = 'O';
+    int my_turn_first = 1; // 1 if you go first, 0 if opponent goes first
+    printf("\nStarting TicTacToe game with GameID: %s\n", gameid);
+    tictactoe_gameplay_loop(gameid, my_symbol, opp_symbol, my_turn_first);
+}
+
+    
+}
+
 
 int main() {
     WSADATA wsa;
