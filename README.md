@@ -9,19 +9,19 @@ Wesley Brian Sy -      Network Communications - UDP Socket Setup, mDNS Discovery
 We used ChatGPT to assist with some portions of the codes and understanding protocol specifications. However, these codes were reviewed, tested, verified first by us.
 
 
-#Project Structure:
+# Project Structure:
 
 
 
-#Features Implemented:
+# Features Implemented:
 
 
 
-#Testing Instructions:
+# Testing Instructions:
 
 
 
-#Demo Video:
+# Demo Video:
 
 
 
