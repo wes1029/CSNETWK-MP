@@ -19,6 +19,7 @@
 #define MAX_GROUP_MEMBERS 20
 #define MAX_NOTIFICATIONS 100
 #define TTL_DEFAULT 3600
+#define VERBOSE(...) do { if (verbose_mode) printf(__VA_ARGS__); } while (0)
 
 char username[50];
 char user_id[128];
@@ -27,6 +28,8 @@ char status[100] = "Online";
 
 char followed_users[MAX_FOLLOWS][128];
 int follow_count = 0;
+
+int verbose_mode = 0;
 
 typedef struct {
     char user_id[100];
@@ -361,14 +364,14 @@ void send_dm(SOCKET sock, Peer *peer, const char *text) {
 
     char msg[1024];
     snprintf(msg, sizeof(msg), "TYPE: DM\nFROM: %s\nTO: %s\nCONTENT: %s\nTIMESTAMP: %ld\nMESSAGE_ID: %s\nTOKEN: %s\n\n", user_id, peer->user_id, text, timestamp, msg_id, token);
-    /*
-    printf("[DEBUG] Sending DM to: %s\n", peer->user_id);
-    printf("[DEBUG] Packet:\n%s\n", msg);
-    printf("[DEBUG] Peer address: %s:%d (has_address=%d)\n",
+    VERBOSE("[DEBUG] Sending DM to: %s\n", peer->user_id);
+    VERBOSE("[DEBUG] Packet:\n%s\n", msg);
+    VERBOSE("[DEBUG] Peer address: %s:%d (has_address=%d)\n",
         inet_ntoa(peer->address.sin_addr),
         ntohs(peer->address.sin_port),
         peer->has_address);
-    */
+    VERBOSE("[DEBUG] User ID: %s\n", user_id);
+    VERBOSE("[DEBUG]");
 
     sendto(sock, msg, strlen(msg), 0, (struct sockaddr *)&peer->address, sizeof(peer->address));
     printf("Sent DM to %s.\n", peer->display_name[0] ? peer->display_name : peer->user_id);
@@ -647,12 +650,10 @@ void receive_messages(SOCKET sock) {
                     
                 }
 
-                /*
-                printf("[DEBUG] user_id: '%s'\n", user_id);
-                printf("[DEBUG] to:       '%s'\n", to);
-                printf("[DEBUG] from:     '%s'\n", from ? from : "NULL");
-                printf("[DEBUG] content:  '%s'\n", content ? content : "NULL");
-                */
+                VERBOSE("[DEBUG] user_id: '%s'\n", user_id);
+                VERBOSE("[DEBUG] to:       '%s'\n", to);
+                VERBOSE("[DEBUG] from:     '%s'\n", from ? from : "NULL");
+                VERBOSE("[DEBUG] content:  '%s'\n", content ? content : "NULL");
 
                 if (to && strcmp(to, user_id) == 0 && from && content) {
                     const char *sender_display = from;
@@ -677,7 +678,7 @@ void receive_messages(SOCKET sock) {
                     snprintf(notification, sizeof(notification), "%s: %s", sender_display, content);
                     add_notification(notification, TTL_DEFAULT);
                 } else {
-                    printf("[DEBUG] DM not shown — TO mismatch or missing fields.\n");
+                    VERBOSE("[DEBUG] DM not shown - TO mismatch or missing fields.\n");
                 } 
             } else if (strstr(type_line, "TYPE: FOLLOW") || strstr(type_line, "TYPE: UNFOLLOW")) {
                 char *from = NULL, *to = NULL, *msg_id = NULL, *token = NULL;
@@ -865,8 +866,8 @@ void print_own_ip() {
     printf("Your Local IP Address: %s\n", ip);
 
     snprintf(user_id, sizeof(user_id), "%s@%s", username, ip);
-    user_id[strcspn(user_id, "\n")] = '\0';  
-    //printf("[DEBUG] my user_id: %s\n", user_id); 
+    user_id[strcspn(user_id, "\n")] = '\0';
+    VERBOSE("[DEBUG] my user_id: %s\n", user_id);
 
     closesocket(s);
 }
@@ -1126,6 +1127,14 @@ int main() {
 
     SOCKET sock;
     setup_udp_socket(&sock);
+
+    //verbose mode switch
+    char choice[10];
+    printf("Enable verbose mode? (y/n): ");
+    fgets(choice, sizeof(choice), stdin);
+    if (choice[0] == 'y' || choice[0] == 'Y') {
+        verbose_mode = 1;
+    }
 
     printf("Enter username: ");
     fgets(username, sizeof(username), stdin);
