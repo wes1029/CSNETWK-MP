@@ -1,4 +1,5 @@
 # CSNETWK-MP
+A UDP-based LAN Communication protocol that enables peer discovery, messaging, file sharing, group management, and 
 
 # Group Members and Roles:
 Wesley Brian Sy - Network Communications - UDP Socket Setup, mDNS Discovery Integration, IP Address Logging
