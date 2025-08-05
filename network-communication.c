@@ -118,10 +118,40 @@ char *generate_token(const char *user_id, const char *scope, int ttl) {
     return token;
 }
 
+int validate_token(const char *token, const char *expected_scope) {
+    char token_copy[256];
+    strncpy(token_copy, token, sizeof(token_copy));
+    
+    char *uid = strtok(token_copy, "|");
+    char *expiry_str = strtok(NULL, "|");
+    char *scope = strtok(NULL, "|");
+
+    if (!uid || !expiry_str || !scope) {
+        VERBOSE("[TOKEN] Invalid token structure.\n");
+        return 0;
+    }
+
+    long expiry = atol(expiry_str);
+    long now = get_unix_timestamp();
+
+    if (now > expiry) {
+        VERBOSE("[TOKEN] Token expired.\n");
+        return 0;
+    }
+
+    if (strcmp(scope, expected_scope) != 0) {
+        VERBOSE("[TOKEN] Scope mismatch. Got: %s, Expected: %s\n", scope, expected_scope);
+        return 0;
+    }
+
+    return 1;
+}
+
 char *generate_message_id() {
     static char id[16];
     for (int i = 0; i < 8; ++i)
         sprintf(&id[i * 2], "%02x", rand() % 256);
+    VERBOSE("Message ID: ", "%s\n", id);
     return id;
 }
 
@@ -275,7 +305,7 @@ void send_ping(SOCKET sock) {
     char msg[512];
     snprintf(msg, sizeof(msg), "TYPE: PING\nUSER_ID: %s\n\n", user_id);
     sendto(sock, msg, strlen(msg), 0, (struct sockaddr *)&bcast, sizeof(bcast));
-    VERBOSE("[DISCOVERY] Sent PING.\n");
+    //VERBOSE("[DISCOVERY] Sent PING.\n");
 }
 
 void send_profile(SOCKET sock) {
@@ -289,7 +319,7 @@ void send_profile(SOCKET sock) {
     snprintf(msg, sizeof(msg),"TYPE: PROFILE\nUSER_ID: %s\nDISPLAY_NAME: %s\nSTATUS: %s\n\n", user_id, display_name, status);
 
     sendto(sock, msg, strlen(msg), 0, (struct sockaddr *)&bcast, sizeof(bcast));
-    VERBOSE("[DISCOVERY] Sent PROFILE.\n");
+    //VERBOSE("[DISCOVERY] Sent PROFILE.\n");
 }
 
 void discovery_loop(void *arg) {
@@ -613,10 +643,10 @@ void receive_messages(SOCKET sock) {
                            (struct sockaddr *)&sender, &sender_len);
         if (len > 0) {
             buffer[len] = '\0';
-            VERBOSE("\n[RECEIVED from %s:%d]\n%s\n",
+            /*VERBOSE("\n[RECEIVED from %s:%d]\n%s\n",
                    inet_ntoa(sender.sin_addr),
                    ntohs(sender.sin_port),
-                   buffer);
+                   buffer);*/
 
             char *type_line = strtok(buffer, "\n");
             if (!type_line) continue;
@@ -649,6 +679,12 @@ void receive_messages(SOCKET sock) {
                     else if (strncmp(line, "MESSAGE_ID: ", 12) == 0) message_id = line + 12;
                     else if (strncmp(line, "TOKEN: ", 7) == 0) token = line + 7;
                     
+                }
+
+                if (token && validate_token(token, "chat")) {
+                    VERBOSE("[TOKEN] Token valid");
+                } else {
+                    VERBOSE("[TOKEN] Invalid or missing token in DM.\n");
                 }
 
                 VERBOSE("[DEBUG] user_id: '%s'\n", user_id);
@@ -692,6 +728,12 @@ void receive_messages(SOCKET sock) {
                     else if (strncmp(line, "TOKEN: ", 7) == 0) token = line + 7;
                 }
 
+                if (token && validate_token(token, "chat")) {
+                    VERBOSE("[TOKEN] Token valid");
+                } else {
+                    VERBOSE("[TOKEN] Invalid or missing token in FOLLOW.\n");
+                }
+
                 if (from && to && strcmp(to, user_id) == 0) {
                     const char *display = from;
 
@@ -728,6 +770,12 @@ void receive_messages(SOCKET sock) {
                     else if (strncmp(line, "TTL: ", 5) == 0) ttl_str = line + 5;
                     else if (strncmp(line, "MESSAGE_ID: ", 12) == 0) message_id = line + 12; 
                     else if (strncmp(line, "TOKEN: ", 7) == 0) token = line + 7;
+                }
+
+                if (token && validate_token(token, "post")) {
+                    VERBOSE("[TOKEN] Token valid");
+                } else {
+                    VERBOSE("[TOKEN] Invalid or missing token in POST.\n");
                 }
 
                 if (uid && content && timestamp_str) {
@@ -770,6 +818,12 @@ void receive_messages(SOCKET sock) {
                     else if (strncmp(line, "ACTION: ", 8) == 0) action = line + 8;
                     else if (strncmp(line, "TIMESTAMP: ", 11) == 0) timestamp = line + 11;
                     else if (strncmp(line, "TOKEN: ", 7) == 0) token = line + 7;
+                }
+
+                if (token && validate_token(token, "like")) {
+                    VERBOSE("[TOKEN] Token valid");
+                } else {
+                    VERBOSE("[TOKEN] Invalid or missing token in LIKE.\n");
                 }
 
                 if (to && strcmp(to, user_id) == 0 && from && post_ts && action) {
@@ -817,6 +871,12 @@ void receive_messages(SOCKET sock) {
                     else if (strncmp(line, "TOKEN: ", 7) == 0) token = line + 7;
                 }
 
+                if (token && validate_token(token, "group")) {
+                    VERBOSE("[TOKEN] Token valid");
+                } else {
+                    VERBOSE("[TOKEN] Invalid or missing token in GROUP CREATE.\n");
+                }
+
                 if (from && gid && gname && members && ts) add_group(from, gid, gname, members, atol(ts));
 
             } else if (strstr(type_line, "TYPE: GROUP_UPDATE")) {
@@ -831,6 +891,12 @@ void receive_messages(SOCKET sock) {
                     else if (strncmp(line, "TOKEN: ", 7) == 0) token = line + 7;
                 }
 
+                if (token && validate_token(token, "group")) {
+                    VERBOSE("[TOKEN] Token valid");
+                } else {
+                    VERBOSE("[TOKEN] Invalid or missing token in GROUP UPDATE.\n");
+                }
+
                 if (from && gid) update_group(gid, add, remove);
 
             } else if (strstr(type_line, "TYPE: GROUP_MESSAGE")) {
@@ -842,6 +908,12 @@ void receive_messages(SOCKET sock) {
                     else if (strncmp(line, "CONTENT: ", 9) == 0) content = line + 9;
                     else if (strncmp(line, "TIMESTAMP: ", 11) == 0) timestamp = line + 11;
                     else if (strncmp(line, "TOKEN: ", 7) == 0) token = line + 7;
+                }
+
+                if (token && validate_token(token, "group_message")) {
+                    VERBOSE("[TOKEN] Token valid");
+                } else {
+                    VERBOSE("[TOKEN] Invalid or missing token in GROUP MESSAGE.\n");
                 }
 
                 if (from && gid && content) handle_group_message(from, gid, content);
