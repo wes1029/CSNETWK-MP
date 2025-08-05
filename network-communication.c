@@ -114,6 +114,7 @@ char *generate_token(const char *user_id, const char *scope, int ttl) {
     static char token[256];
     long now = get_unix_timestamp();
     snprintf(token, sizeof(token), "%s|%ld|%s", user_id, now + ttl, scope);
+    VERBOSE("Token: ", "%s\n", token);
     return token;
 }
 
@@ -259,7 +260,7 @@ void send_follow_packet(SOCKET sock, const char *target_user_id, int follow) {
              token);
 
     sendto(sock, msg, strlen(msg), 0, (struct sockaddr *)&target_addr, sizeof(target_addr));
-    //printf("%s request sent to %s.\n", follow ? "FOLLOW" : "UNFOLLOW", target_user_id);
+    VERBOSE("%s request sent to %s.\n", follow ? "FOLLOW" : "UNFOLLOW", target_user_id);
 }
 
 void send_ping(SOCKET sock) {
@@ -274,7 +275,7 @@ void send_ping(SOCKET sock) {
     char msg[512];
     snprintf(msg, sizeof(msg), "TYPE: PING\nUSER_ID: %s\n\n", user_id);
     sendto(sock, msg, strlen(msg), 0, (struct sockaddr *)&bcast, sizeof(bcast));
-    //printf("[DISCOVERY] Sent PING.\n");
+    VERBOSE("[DISCOVERY] Sent PING.\n");
 }
 
 void send_profile(SOCKET sock) {
@@ -288,7 +289,7 @@ void send_profile(SOCKET sock) {
     snprintf(msg, sizeof(msg),"TYPE: PROFILE\nUSER_ID: %s\nDISPLAY_NAME: %s\nSTATUS: %s\n\n", user_id, display_name, status);
 
     sendto(sock, msg, strlen(msg), 0, (struct sockaddr *)&bcast, sizeof(bcast));
-    //printf("[DISCOVERY] Sent PROFILE.\n");
+    VERBOSE("[DISCOVERY] Sent PROFILE.\n");
 }
 
 void discovery_loop(void *arg) {
@@ -612,10 +613,10 @@ void receive_messages(SOCKET sock) {
                            (struct sockaddr *)&sender, &sender_len);
         if (len > 0) {
             buffer[len] = '\0';
-            /*printf("\n[RECEIVED from %s:%d]\n%s\n",
+            VERBOSE("\n[RECEIVED from %s:%d]\n%s\n",
                    inet_ntoa(sender.sin_addr),
                    ntohs(sender.sin_port),
-                   buffer);*/
+                   buffer);
 
             char *type_line = strtok(buffer, "\n");
             if (!type_line) continue;
