@@ -1,7 +1,7 @@
 # CSNETWK-MP
 
-Group Members:         Role:
-Wesley Brian Sy -      Network Communications - UDP Socket Setup, mDNS Discovery Integration, IP Address Logging
+# Group Members and Roles:
+Wesley Brian Sy - Network Communications - UDP Socket Setup, mDNS Discovery Integration, IP Address Logging
 
 
 
