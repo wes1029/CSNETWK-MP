@@ -78,6 +78,19 @@ struct TTTMoveMsg {
     char symbol;
 };
 
+typedef struct {
+    char fileid[64];
+    char filename[256];
+    long filesize;
+    char filetype[64];
+    char description[256];
+    int accepted;
+    int total_chunks;
+    int received_chunks;
+    char **chunks; // Array of base64 strings
+} FileTransferContext;
+FileTransferContext file_ctx;
+
 struct TTTMoveMsg ttt_msg_queue[MAX_TTT_MSGS];
 int ttt_msg_count = 0;
 
@@ -1140,9 +1153,145 @@ void input_loop(void *arg) {
         }
     }
 }
+/* FUNCTIONS FOR FILE TRANSFER */
+// Sends a FILE_OFFER message to a peer
+void send_file_offer(SOCKET sock, const char *from_uid, const char *to_uid, const char *filename, long filesize, const char *filetype, const char *fileid, const char *description) {
+    struct sockaddr_in target_addr = {0}; 
+    int found = 0;
+    // Find the target user's address
+    EnterCriticalSection(&peer_lock);
+    for (int i = 0; i < peer_count; ++i) {
+        if (strcmp(peer_list[i].user_id, to_uid) == 0) {
+            target_addr = peer_list[i].address;
+            found = peer_list[i].has_address;
+            break;
+        }
+    }
+    LeaveCriticalSection(&peer_lock);
+    if (!found) {
+        printf("Cannot send FILE_OFFER: unknown or offline peer.\n");
+        return;
+    }
+    // Prepare the message
+    long ts = get_unix_timestamp();
+    char *token = generate_token(from_uid, "file", 3600);
+    char msg[1024];
+    snprintf(msg, sizeof(msg),
+        "TYPE: FILE_OFFER\nFROM: %s\nTO: %s\nFILENAME: %s\nFILESIZE: %ld\nFILETYPE: %s\nFILEID: %s\nDESCRIPTION: %s\nTIMESTAMP: %ld\nTOKEN: %s\n\n",
+        from_uid, to_uid, filename, filesize, filetype, fileid, description ? description : "", ts, token);
+    sendto(sock, msg, strlen(msg), 0, (struct sockaddr *)&target_addr, sizeof(target_addr));
+    printf("File offer sent to %s for file '%s'.\n", to_uid, filename);
+}
+void reset_file_ctx() {
+    memset(&file_ctx, 0, sizeof(file_ctx)); // Reset all fields
+    if (file_ctx.chunks) {
+        for (int i = 0; i < file_ctx.total_chunks; ++i) {
+            if (file_ctx.chunks[i]) free(file_ctx.chunks[i]);  // Free each chunk
+        }
+        free(file_ctx.chunks);
+        file_ctx.chunks = NULL; // Reset pointer
+    }
+}
+
+// Handles incoming FILE_OFFER messages
+void handle_file_offer(const char *from, const char *filename, long filesize, const char *filetype, const char *fileid, const char *description) {
+    reset_file_ctx(); // Reset the context for a new file transfer
+    strncpy(file_ctx.fileid, fileid, sizeof(file_ctx.fileid)); // Store file ID
+    strncpy(file_ctx.filename, filename, sizeof(file_ctx.filename)); // Store filename
+    file_ctx.filesize = filesize; // Store file size
+    strncpy(file_ctx.filetype, filetype, sizeof(file_ctx.filetype));
+    strncpy(file_ctx.description, description ? description : "", sizeof(file_ctx.description));
+    file_ctx.accepted = 0;
+    printf("User %s is sending you a file '%s' (%s, %ld bytes). Do you accept? (y/n): ", from, filename, filetype, filesize);
+    char input[8];
+    fgets(input, sizeof(input), stdin);
+    if (input[0] == 'y' || input[0] == 'Y') { // Accept the file offer
+        file_ctx.accepted = 1;
+        printf("Accepted file offer. Waiting for file chunks...\n");
+    } else {
+        file_ctx.accepted = 0;
+        printf("Ignored file offer.\n");
+    }
+}
+
+// Sends a FILE_CHUNK message to a peer
+void send_file_chunk(SOCKET sock, const char *from_uid, const char *to_uid, const char *fileid, int chunk_index, int total_chunks, int chunk_size, const char *base64_data) {
+    struct sockaddr_in target_addr = {0};
+    int found = 0;
+
+    // Find the target user's address
+    EnterCriticalSection(&peer_lock);
+    for (int i = 0; i < peer_count; ++i) {
+        if (strcmp(peer_list[i].user_id, to_uid) == 0) {
+            target_addr = peer_list[i].address;
+            found = peer_list[i].has_address;
+            break;
+        }
+    }
+    LeaveCriticalSection(&peer_lock);
+    if (!found) {
+        printf("Cannot send FILE_CHUNK: unknown or offline peer.\n");
+        return;
+    }
+    char *token = generate_token(from_uid, "file", 3600);
+    char msg[2048];
+    snprintf(msg, sizeof(msg),
+        "TYPE: FILE_CHUNK\nFROM: %s\nTO: %s\nFILEID: %s\nCHUNK_INDEX: %d\nTOTAL_CHUNKS: %d\nCHUNK_SIZE: %d\nTOKEN: %s\nDATA: %s\n\n",
+        from_uid, to_uid, fileid, chunk_index, total_chunks, chunk_size, token, base64_data);
+    sendto(sock, msg, strlen(msg), 0, (struct sockaddr *)&target_addr, sizeof(target_addr));
+    // No print until all chunks are received
+}
+
+// Handles incoming FILE_CHUNK message 
+void handle_file_chunk(const char *fileid, int chunk_index, int total_chunks, int chunk_size, const char *base64_data, const char *filename) {
+    if (!file_ctx.accepted || strcmp(file_ctx.fileid, fileid) != 0) // Check if this chunk belongs to the current file transfer
+      return; 
+    if (!file_ctx.chunks) { // Initialize the chunks array if not already done
+        file_ctx.total_chunks = total_chunks;
+        file_ctx.chunks = (char **)calloc(total_chunks, sizeof(char *));
+        file_ctx.received_chunks = 0;
+    } 
+    if (chunk_index < 0 || chunk_index >= total_chunks)  // Invalid chunk index
+      return;
+    return;
+    if (!file_ctx.chunks[chunk_index]) { // Only store if not already received
+        file_ctx.chunks[chunk_index] = strdup(base64_data);
+        file_ctx.received_chunks++;
+    }
+    if (file_ctx.received_chunks == total_chunks) { // All chunks received
+        printf("File transfer of %s is complete\n", filename);
+        //Can potentially add code here to decode if needed - Johann
+        reset_file_ctx(); // Reset context for next transfer
+    }
+}
+
+// Sends a FILE_RECEIVED message to a peer
+void send_file_received(SOCKET sock, const char *from_uid, const char *to_uid, const char *fileid, const char *status) {
+    struct sockaddr_in target_addr = {0};
+    int found = 0;
+
+    // Find the target user's address
+    EnterCriticalSection(&peer_lock);
+    for (int i = 0; i < peer_count; ++i) {
+        if (strcmp(peer_list[i].user_id, to_uid) == 0) {
+            target_addr = peer_list[i].address;
+            found = peer_list[i].has_address;
+            break;
+        }
+    }
+    LeaveCriticalSection(&peer_lock);
+    if (!found) return;
+    long ts = get_unix_timestamp();
+    char msg[512];
+    snprintf(msg, sizeof(msg), // Prepare the message
+        "TYPE: FILE_RECEIVED\nFROM: %s\nTO: %s\nFILEID: %s\nSTATUS: %s\nTIMESTAMP: %ld\n\n",
+        from_uid, to_uid, fileid, status, ts);
+    sendto(sock, msg, strlen(msg), 0, (struct sockaddr *)&target_addr, sizeof(target_addr));
+   
+}
 
 
-//TIC TAC TOE FUNCTIONS
+/* FUNCTIONS FOR TIC TAC TOE */ 
 
 // This function sends a TicTacToe invite to a user
 void send_tictactoe(SOCKET sock, const char *from_uid, const char *to_uid, const char *gameid, const char *symbol) {
